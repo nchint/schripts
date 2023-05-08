@@ -1,0 +1,65 @@
+#!/bin/bash
+set -e
+POD_LABEL_NAME="autodesigner-platform"
+EXTERNAL_IP_PATH='.status.addresses[?(@.type=="ExternalIP")].address'
+VC_GIT_REPO="$HOME/Projects/virtual-cluster-deployments"
+
+usage() {
+    cat << EOF
+usage: add-ad-ip <vc_name>
+
+Add the $POD_LABEL_NAME Pod's ExternalIP to the Virtual Cluster's JobServer
+access allow list.
+EOF
+    exit 1
+}
+
+pod_node_names() {
+    kubectl get pod \
+        --selector "app.kubernetes.io/name=$POD_LABEL_NAME" \
+        --field-selector 'status.phase=Running' \
+        --output 'custom-columns=NODE-NAME:.spec.nodeName' \
+        --no-headers
+}
+
+external_ip() {
+    kubectl get node "$1" -o jsonpath="{$EXTERNAL_IP_PATH}"
+}
+
+if [[ $# != 1 || $1 == "" ]]; then
+    usage
+fi
+
+# NOTE: This is purely a sanity check for the autodesigner-platform that
+#       we don't have multiple Pods running. In reality this is not necessarily
+#       a bad thing; we just only expect one Pod to be running.
+# NOTE: Mac `wc` does not strip leading spaces
+node_name=$(pod_node_names)
+if [[ $(echo "$node_name" | wc -w | tr -d "[:space:]") != 1 ]]; then
+    echo "ERROR: there isn't exactly one Running $POD_LABEL_NAME Pod running"
+    exit 1
+fi
+
+ip_addr=$(external_ip "$node_name")
+
+read -r -p "Add \"$ip_addr/32\" to the \"$1\" Virtual Cluster? (yes/no): " yn
+case $yn in
+    yes | y)
+        ;;
+    no | n)
+        exit
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+
+cd "$VC_GIT_REPO"
+gh workflow run .github/workflows/modify_vc.yml --json <<EOF
+{
+    "VC_NAME": "$1",
+    "MODIFY_TASK_TYPE": "firewall-add-jobserver-access-cidr",
+    "MODIFY_TASK_VALUE": "$ip_addr/32"
+}
+EOF
+
